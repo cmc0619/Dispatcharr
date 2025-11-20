@@ -1319,27 +1319,11 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
 
             Episode.objects.bulk_create(episodes_to_create, ignore_conflicts=True)
 
-            # Re-fetch ALL episodes that were supposed to be created to get their actual IDs
-            # This handles both newly created episodes and ones that already existed
-            episode_keys_to_create = [
-                (ep.series_id, ep.season_number, ep.episode_number)
-                for ep in episodes_to_create
-            ]
-
-            # Build filter for all episode keys
-            from django.db.models import Q
-            episode_filter = Q()
-            for series_id, season_num, ep_num in episode_keys_to_create:
-                episode_filter |= Q(
-                    series_id=series_id,
-                    season_number=season_num,
-                    episode_number=ep_num
-                )
-
-            # Fetch actual episodes from database
-            actual_episodes = {
+            # Re-fetch ALL episodes for this series to get their actual IDs
+            # This is simpler and more reliable than building complex Q filters
+            all_series_episodes = {
                 (ep.series_id, ep.season_number, ep.episode_number): ep
-                for ep in Episode.objects.filter(episode_filter)
+                for ep in Episode.objects.filter(series=series)
             }
 
             # Update ALL relations that reference episodes from episodes_to_create
@@ -1351,8 +1335,11 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                         relation.episode.season_number,
                         relation.episode.episode_number
                     )
-                    if key in actual_episodes:
-                        relation.episode = actual_episodes[key]
+                    if key in all_series_episodes:
+                        relation.episode = all_series_episodes[key]
+                    else:
+                        # Episode not found - this shouldn't happen but log it
+                        logger.error(f"Could not find episode for key {key} after bulk_create")
 
         # Update existing episodes
         if episodes_to_update:
@@ -1361,9 +1348,15 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 'tmdb_id', 'imdb_id', 'custom_properties'
             ])
 
+        # Filter out any relations that still have unsaved episodes
+        valid_relations = [r for r in relations_to_create if r.episode and r.episode.pk]
+        if len(valid_relations) != len(relations_to_create):
+            skipped = len(relations_to_create) - len(valid_relations)
+            logger.warning(f"Skipping {skipped} relations with unresolved episodes")
+
         # Create new episode relations
-        if relations_to_create:
-            M3UEpisodeRelation.objects.bulk_create(relations_to_create)
+        if valid_relations:
+            M3UEpisodeRelation.objects.bulk_create(valid_relations)
 
         # Update existing episode relations
         if relations_to_update:
@@ -1371,8 +1364,10 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 'episode', 'container_extension', 'custom_properties', 'last_seen'
             ])
 
+    # Calculate actual relations created (valid_relations if it was set, otherwise relations_to_create)
+    relations_created_count = len(valid_relations) if 'valid_relations' in locals() else len(relations_to_create)
     logger.info(f"Batch processed episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated, "
-                f"{len(relations_to_create)} new relations, {len(relations_to_update)} updated relations")
+                f"{relations_created_count} new relations, {len(relations_to_update)} updated relations")
 
 
 @shared_task
