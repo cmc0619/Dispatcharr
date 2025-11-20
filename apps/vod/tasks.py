@@ -1203,7 +1203,7 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
             episode_id = str(episode_data.get('id'))
             episode_name = episode_data.get('title', 'Unknown Episode')
             season_number = episode_data['_season_number']
-            episode_number = episode_data.get('episode_num', 0)
+            episode_number = int(episode_data.get('episode_num', 0))
             info = episode_data.get('info', {})
 
             # Extract episode metadata
