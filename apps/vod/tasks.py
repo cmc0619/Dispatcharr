@@ -1167,7 +1167,7 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     if not all_episodes_data:
         return
 
-    logger.info(f"Batch processing {len(all_episodes_data)} episodes for series {series.name}")
+    logger.info(f"Batch processing {len(all_episodes_data)} stream entries for series {series.name}")
 
     # Extract episode identifiers
     episode_keys = []
@@ -1195,8 +1195,13 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     # Prepare batch operations
     episodes_to_create = []
     episodes_to_update = []
+    episodes_to_update_set = set()  # Track episodes already queued for update (avoid duplicates)
     relations_to_create = []
     relations_to_update = []
+
+    # Track episodes being created/updated in THIS batch to avoid duplicates
+    # Key: (series_id, season_number, episode_number) -> Episode object
+    batch_episodes = {}
 
     for episode_data in all_episodes_data:
         try:
@@ -1227,56 +1232,71 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 if backdrop:
                     custom_props['backdrop_path'] = [backdrop]
 
-            # Find existing episode
+            # Find existing episode - check batch first, then database
             episode_key = (series.id, season_number, episode_number)
-            episode = existing_episodes.get(episode_key)
 
-            if episode:
-                # Update existing episode
-                updated = False
-                if episode_name != episode.name:
-                    episode.name = episode_name
-                    updated = True
-                if description != episode.description:
-                    episode.description = description
-                    updated = True
-                if rating != episode.rating:
-                    episode.rating = rating
-                    updated = True
-                if air_date != episode.air_date:
-                    episode.air_date = air_date
-                    updated = True
-                if duration_secs != episode.duration_secs:
-                    episode.duration_secs = duration_secs
-                    updated = True
-                if tmdb_id != episode.tmdb_id:
-                    episode.tmdb_id = tmdb_id
-                    updated = True
-                if imdb_id != episode.imdb_id:
-                    episode.imdb_id = imdb_id
-                    updated = True
-                if custom_props != episode.custom_properties:
-                    episode.custom_properties = custom_props if custom_props else None
-                    updated = True
-
-                if updated:
-                    episodes_to_update.append(episode)
+            # Check if we've already processed this episode in this batch
+            if episode_key in batch_episodes:
+                # Reuse the episode from this batch
+                episode = batch_episodes[episode_key]
+                logger.debug(f"Reusing episode from batch: {episode_name} (S{season_number:02d}E{episode_number:02d})")
             else:
-                # Create new episode
-                episode = Episode(
-                    series=series,
-                    name=episode_name,
-                    description=description,
-                    air_date=air_date,
-                    rating=rating,
-                    duration_secs=duration_secs,
-                    season_number=season_number,
-                    episode_number=episode_number,
-                    tmdb_id=tmdb_id,
-                    imdb_id=imdb_id,
-                    custom_properties=custom_props if custom_props else None
-                )
-                episodes_to_create.append(episode)
+                # Check if episode exists in database
+                episode = existing_episodes.get(episode_key)
+
+                if episode:
+                    # Update existing episode (but only once per unique episode)
+                    updated = False
+                    if episode_name != episode.name:
+                        episode.name = episode_name
+                        updated = True
+                    if description != episode.description:
+                        episode.description = description
+                        updated = True
+                    if rating != episode.rating:
+                        episode.rating = rating
+                        updated = True
+                    if air_date != episode.air_date:
+                        episode.air_date = air_date
+                        updated = True
+                    if duration_secs != episode.duration_secs:
+                        episode.duration_secs = duration_secs
+                        updated = True
+                    if tmdb_id != episode.tmdb_id:
+                        episode.tmdb_id = tmdb_id
+                        updated = True
+                    if imdb_id != episode.imdb_id:
+                        episode.imdb_id = imdb_id
+                        updated = True
+                    if custom_props != episode.custom_properties:
+                        episode.custom_properties = custom_props if custom_props else None
+                        updated = True
+
+                    if updated and id(episode) not in episodes_to_update_set:
+                        episodes_to_update.append(episode)
+                        episodes_to_update_set.add(id(episode))
+
+                    # Add to batch tracking
+                    batch_episodes[episode_key] = episode
+                else:
+                    # Create new episode (only once per unique episode)
+                    episode = Episode(
+                        series=series,
+                        name=episode_name,
+                        description=description,
+                        air_date=air_date,
+                        rating=rating,
+                        duration_secs=duration_secs,
+                        season_number=season_number,
+                        episode_number=episode_number,
+                        tmdb_id=tmdb_id,
+                        imdb_id=imdb_id,
+                        custom_properties=custom_props if custom_props else None
+                    )
+                    episodes_to_create.append(episode)
+
+                    # Add to batch tracking
+                    batch_episodes[episode_key] = episode
 
             # Handle episode relation
             if episode_id in existing_relations:
@@ -1366,8 +1386,14 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
 
     # Calculate actual relations created (valid_relations if it was set, otherwise relations_to_create)
     relations_created_count = len(valid_relations) if 'valid_relations' in locals() else len(relations_to_create)
-    logger.info(f"Batch processed episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated, "
-                f"{relations_created_count} new relations, {len(relations_to_update)} updated relations")
+
+    # Calculate deduplication stats
+    unique_episodes = len(batch_episodes)
+    total_streams = len(all_episodes_data)
+
+    logger.info(f"Batch processed {total_streams} stream(s) -> {unique_episodes} unique episode(s) for series {series.name}")
+    logger.info(f"Episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated")
+    logger.info(f"Relations: {relations_created_count} new, {len(relations_to_update)} updated")
 
 
 @shared_task
