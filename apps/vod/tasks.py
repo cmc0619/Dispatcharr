@@ -1395,6 +1395,11 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     logger.info(f"Episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated")
     logger.info(f"Relations: {relations_created_count} new, {len(relations_to_update)} updated")
 
+    # Explicit cleanup to help garbage collection in low-memory environments
+    batch_episodes.clear()
+    episodes_to_update_set.clear()
+    del episodes_to_create, episodes_to_update, relations_to_create, relations_to_update
+
 
 @shared_task
 def batch_refresh_series_episodes(account_id, series_ids=None):
