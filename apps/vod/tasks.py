@@ -1240,10 +1240,26 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
 
     # Flatten episodes data
     all_episodes_data = []
-    for season_num, season_episodes in episodes_data.items():
-        for episode_data in season_episodes:
+
+    # Handle both dict (normal) and list (malformed provider response) formats
+    if isinstance(episodes_data, dict):
+        # Normal format: {"1": [...episodes...], "2": [...episodes...]}
+        for season_num, season_episodes in episodes_data.items():
+            for episode_data in season_episodes:
+                episode_data['_season_number'] = int(season_num)
+                all_episodes_data.append(episode_data)
+    elif isinstance(episodes_data, list):
+        # Malformed format: [...episodes...] (provider didn't organize by season)
+        logger.warning(f"Provider returned episodes as list instead of dict for series {series.name}. "
+                      f"Attempting to extract season numbers from episode data.")
+        for episode_data in episodes_data:
+            # Try to get season from episode data itself
+            season_num = episode_data.get('season_number') or episode_data.get('season') or 0
             episode_data['_season_number'] = int(season_num)
             all_episodes_data.append(episode_data)
+    else:
+        logger.error(f"Unexpected episodes_data format for series {series.name}: {type(episodes_data)}")
+        return
 
     if not all_episodes_data:
         return
