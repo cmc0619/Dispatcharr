@@ -173,6 +173,69 @@ Expected output:
 ✓ ALL TESTS PASSED!
 ```
 
+### Stream Comparison Tool
+Verify if duplicate stream_ids are actually different content or duplicates:
+```bash
+# Run from within Docker container
+python compare_streams.py
+```
+
+This tool automatically:
+1. Scans all active M3U accounts for episodes with multiple streams
+2. Selects first 10 episodes with duplicate streams per provider
+3. Uses ffprobe to analyze resolution, bitrate, codec, file size
+4. Compares streams and reports if they're identical or different quality variants
+5. Provides overall summary showing how many are true duplicates vs quality variants
+
+Expected output example:
+```
+=== Scanning database for episodes with duplicate streams ===
+
+Checking provider: ChicoTV
+  Found 342 episodes with multiple streams
+  Will analyze first 10 episodes
+
+================================================================================
+Episode: MasterChef Junior - S09E02 - Episode 2
+Series: MasterChef Junior (2013)
+Season 9, Episode 2
+Provider: ChicoTV
+Found 5 stream(s)
+================================================================================
+
+Analyzing stream 78025...
+  ✓ Resolution: 1920x1080
+  ✓ Codec: h264
+  ✓ Bitrate: 5000 kbps
+  ✓ File size: 2847.3 MB
+
+Analyzing stream 78026...
+  ✓ Resolution: 1920x1080
+  ✓ Codec: h264
+  ✓ Bitrate: 5012 kbps
+  ✓ File size: 2853.1 MB
+
+⚠️  WARNING: All streams appear IDENTICAL!
+   Resolution: 1920x1080
+   Bitrate:    5000 kbps
+   Codec:      h264
+   File size:  2847.3 MB
+
+   These are likely DUPLICATES, not different quality versions.
+   The provider may be sending the same stream with multiple IDs.
+
+================================================================================
+OVERALL SUMMARY
+================================================================================
+Total episodes analyzed: 10
+Episodes with IDENTICAL streams: 8
+Episodes with DIFFERENT streams: 2
+
+⚠️  Warning: Some providers are sending duplicate streams with different IDs.
+   This is the root cause of issue #556 and #569.
+   The deduplication fix in apps/vod/tasks.py handles this correctly.
+```
+
 ## Backward Compatibility
 
 This fix is **fully backward compatible**:

@@ -1,12 +1,24 @@
 #!/usr/bin/env python3
 """
-Simple stream comparison tool that works without Django.
-Uses ffprobe to compare stream quality.
+Stream comparison tool that automatically discovers episodes with duplicate streams.
+Analyzes the first 10 episodes with multiple streams from each provider using ffprobe.
 """
 
+import os
+import sys
+import django
 import subprocess
 import json
-import sys
+from collections import defaultdict
+
+# Setup Django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
+django.setup()
+
+from django.db.models import Count
+from apps.vod.models import Episode, M3UEpisodeRelation
+from apps.m3u.models import M3UAccount
+
 
 def ffprobe_stream(url, timeout=10):
     """Use ffprobe to get stream metadata."""
@@ -74,138 +86,98 @@ def ffprobe_stream(url, timeout=10):
         return None
 
 
-def get_episode_streams_from_api(episode_uuid, base_url="http://localhost:5656"):
-    """Get stream URLs for an episode from Dispatcharr API."""
-    import requests
+def find_episodes_with_duplicate_streams():
+    """
+    Find episodes that have multiple M3UEpisodeRelation entries.
+    Returns dict: {account: [episode_ids with multiple streams]}
+    """
+    print("=== Scanning database for episodes with duplicate streams ===\n")
 
-    try:
-        # Get episode details
-        response = requests.get(f"{base_url}/api/vod/episodes/{episode_uuid}/")
-        if response.status_code != 200:
-            print(f"Failed to get episode: {response.status_code}")
-            return None
+    # Get all active M3U accounts
+    accounts = M3UAccount.objects.filter(is_active=True)
 
-        episode_data = response.json()
+    if not accounts.exists():
+        print("ERROR: No active M3U accounts found")
+        return {}
 
-        # Get provider relations
-        providers = episode_data.get('providers', [])
-        if not providers:
-            print("No providers found for this episode")
-            return None
+    episodes_by_account = {}
 
-        print(f"Episode: {episode_data.get('name', 'Unknown')}")
-        print(f"Series: {episode_data.get('series', {}).get('name', 'Unknown')}")
-        print(f"Found {len(providers)} stream(s)\n")
+    for account in accounts:
+        print(f"Checking provider: {account.name}")
 
-        # Build stream URLs
-        streams = []
-        for provider in providers:
-            stream_id = provider.get('stream_id')
-            account = provider.get('m3u_account', {})
+        # Find episodes with multiple streams from this account
+        # Group by episode and count relations
+        duplicate_episodes = (
+            M3UEpisodeRelation.objects
+            .filter(m3u_account=account)
+            .values('episode')
+            .annotate(stream_count=Count('id'))
+            .filter(stream_count__gt=1)
+            .order_by('-stream_count')
+        )
 
-            # Build the stream URL from relation
-            stream_url = None
-            if 'episode' in provider:
-                # Use the get_stream_url method via the relation
-                container = provider.get('container_extension', 'mp4')
-                # This is the Xtream Codes URL format
-                if account.get('account_type') == 'XC':
-                    server_url = account.get('server_url', '').rstrip('/')
-                    username = account.get('username', '')
-                    password = account.get('password', '')
-                    stream_url = f"{server_url}/series/{username}/{password}/{stream_id}.{container}"
+        if duplicate_episodes:
+            episode_ids = [item['episode'] for item in duplicate_episodes[:10]]
+            episodes_by_account[account] = episode_ids
+            print(f"  Found {len(duplicate_episodes)} episodes with multiple streams")
+            print(f"  Will analyze first {min(10, len(duplicate_episodes))} episodes\n")
+        else:
+            print(f"  No episodes with multiple streams found\n")
 
-            if stream_url:
-                streams.append({
-                    'id': stream_id,
-                    'url': stream_url,
-                    'account': account.get('name', 'Unknown')
-                })
-
-        return streams
-
-    except Exception as e:
-        print(f"API error: {e}")
-        return None
+    return episodes_by_account
 
 
-if __name__ == "__main__":
+def analyze_episode_streams(account, episode):
+    """Analyze all streams for a given episode from a specific account."""
+    relations = M3UEpisodeRelation.objects.filter(
+        m3u_account=account,
+        episode=episode
+    )
+
     print("=" * 80)
-    print("Stream Comparison Tool (Standalone)")
+    print(f"Episode: {episode.name}")
+    print(f"Series: {episode.series.name}")
+    print(f"Season {episode.season_number}, Episode {episode.episode_number}")
+    print(f"Provider: {account.name}")
+    print(f"Found {relations.count()} stream(s)")
     print("=" * 80)
-
-    if len(sys.argv) < 2:
-        print("\nUsage:")
-        print("  Compare streams for a Dispatcharr episode:")
-        print("    python compare_streams.py --episode <episode_uuid>")
-        print("\n  Compare specific URLs:")
-        print("    python compare_streams.py <url1> <url2> <url3> ...")
-        print("\nExample:")
-        print("  python compare_streams.py --episode f30a37c0-cc16-4879-8dbc-2a21505877d7")
-        sys.exit(1)
 
     results = {}
 
-    if sys.argv[1] == '--episode':
-        # Get streams from Dispatcharr API
-        if len(sys.argv) < 3:
-            print("Error: Missing episode UUID")
-            sys.exit(1)
+    for rel in relations:
+        stream_url = rel.get_stream_url()
+        if not stream_url:
+            print(f"\nStream {rel.stream_id}:")
+            print(f"  ✗ Could not generate stream URL")
+            continue
 
-        episode_uuid = sys.argv[2]
-        base_url = sys.argv[3] if len(sys.argv) > 3 else "http://localhost:5656"
+        print(f"\nAnalyzing stream {rel.stream_id}...")
+        print(f"  URL: {stream_url[:80]}...")
 
-        streams = get_episode_streams_from_api(episode_uuid, base_url)
-        if not streams:
-            sys.exit(1)
-
-        for stream in streams:
-            print(f"Analyzing stream {stream['id']} ({stream['account']})...")
-            print(f"  URL: {stream['url'][:80]}...")
-
-            metadata = ffprobe_stream(stream['url'], timeout=15)
-            if metadata:
-                results[stream['id']] = metadata
-                print(f"  ✓ Resolution: {metadata['resolution']}")
-                print(f"  ✓ Codec: {metadata['codec']}")
-                print(f"  ✓ Bitrate: {metadata['bitrate'] / 1000:.0f} kbps")
-                print(f"  ✓ File size: {metadata['file_size'] / (1024*1024):.1f} MB")
-                if metadata['fps'] > 0:
-                    print(f"  ✓ FPS: {metadata['fps']:.2f}")
-                if 'audio_codec' in metadata:
-                    print(f"  ✓ Audio: {metadata['audio_codec']}")
-            else:
-                results[stream['id']] = None
-            print()
-    else:
-        # Direct URL comparison
-        stream_urls = sys.argv[1:]
-        print(f"Comparing {len(stream_urls)} stream(s)...\n")
-
-        for i, url in enumerate(stream_urls):
-            stream_id = f"Stream_{i+1}"
-            print(f"Analyzing {stream_id}...")
-            print(f"  URL: {url[:80]}...")
-
-            metadata = ffprobe_stream(url, timeout=15)
-            if metadata:
-                results[stream_id] = metadata
-                print(f"  ✓ Resolution: {metadata['resolution']}")
-                print(f"  ✓ Bitrate: {metadata['bitrate'] / 1000:.0f} kbps")
-            else:
-                results[stream_id] = None
-            print()
+        metadata = ffprobe_stream(stream_url, timeout=15)
+        if metadata:
+            results[rel.stream_id] = metadata
+            print(f"  ✓ Resolution: {metadata['resolution']}")
+            print(f"  ✓ Codec: {metadata['codec']}")
+            print(f"  ✓ Bitrate: {metadata['bitrate'] / 1000:.0f} kbps")
+            print(f"  ✓ File size: {metadata['file_size'] / (1024*1024):.1f} MB")
+            if metadata['fps'] > 0:
+                print(f"  ✓ FPS: {metadata['fps']:.2f}")
+            if 'audio_codec' in metadata:
+                print(f"  ✓ Audio: {metadata['audio_codec']} ({metadata.get('audio_channels', 0)} channels)")
+        else:
+            results[rel.stream_id] = None
 
     # Compare results
-    print("=" * 80)
+    print("\n" + "=" * 80)
     print("COMPARISON RESULTS")
     print("=" * 80)
 
     valid_results = {k: v for k, v in results.items() if v is not None}
 
     if len(valid_results) < 2:
-        print("Not enough valid streams to compare")
-        sys.exit(0)
+        print("Not enough valid streams to compare\n")
+        return False
 
     # Check if all identical
     first = list(valid_results.values())[0]
@@ -230,7 +202,8 @@ if __name__ == "__main__":
         print(f"   Codec:      {first['codec']}")
         print(f"   File size:  {first['file_size'] / (1024*1024):.1f} MB")
         print("\n   These are likely DUPLICATES, not different quality versions.")
-        print("   The provider may be sending the same stream with multiple IDs.")
+        print("   The provider may be sending the same stream with multiple IDs.\n")
+        return True  # Identical
     else:
         print("\n✓ Streams have DIFFERENT characteristics:\n")
         print(f"{'Stream ID':<20} {'Resolution':<15} {'Bitrate':<12} {'Size':<10} {'Codec'}")
@@ -239,5 +212,80 @@ if __name__ == "__main__":
             print(f"{stream_id:<20} {metadata['resolution']:<15} "
                   f"{metadata['bitrate']/1000:>8.0f} kbps "
                   f"{metadata['file_size']/(1024*1024):>6.1f} MB  {metadata['codec']}")
+        print("\n   These appear to be legitimate quality variants.\n")
+        return False  # Different
 
-        print("\n   These appear to be legitimate quality variants.")
+
+def main():
+    print("=" * 80)
+    print("Automatic Stream Comparison Tool")
+    print("=" * 80)
+    print()
+
+    # Find episodes with duplicate streams
+    episodes_by_account = find_episodes_with_duplicate_streams()
+
+    if not episodes_by_account:
+        print("No episodes with duplicate streams found in any provider.")
+        return
+
+    # Analyze each provider's duplicate episodes
+    total_analyzed = 0
+    identical_count = 0
+    different_count = 0
+
+    for account, episode_ids in episodes_by_account.items():
+        print(f"\n{'=' * 80}")
+        print(f"ANALYZING PROVIDER: {account.name}")
+        print(f"{'=' * 80}\n")
+
+        for episode_id in episode_ids:
+            try:
+                episode = Episode.objects.get(id=episode_id)
+                is_identical = analyze_episode_streams(account, episode)
+                total_analyzed += 1
+
+                if is_identical:
+                    identical_count += 1
+                else:
+                    different_count += 1
+
+                print("\n" + "-" * 80 + "\n")
+
+            except Episode.DoesNotExist:
+                print(f"ERROR: Episode with ID {episode_id} not found\n")
+                continue
+            except Exception as e:
+                print(f"ERROR analyzing episode {episode_id}: {e}\n")
+                continue
+
+    # Summary
+    print("\n" + "=" * 80)
+    print("OVERALL SUMMARY")
+    print("=" * 80)
+    print(f"Total episodes analyzed: {total_analyzed}")
+    print(f"Episodes with IDENTICAL streams: {identical_count}")
+    print(f"Episodes with DIFFERENT streams: {different_count}")
+
+    if identical_count > 0:
+        print("\n⚠️  Warning: Some providers are sending duplicate streams with different IDs.")
+        print("   This is the root cause of issue #556 and #569.")
+        print("   The deduplication fix in apps/vod/tasks.py handles this correctly.")
+
+    if different_count > 0:
+        print("\n✓ Some streams represent legitimate quality variants (different resolution/bitrate).")
+
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\nFATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
