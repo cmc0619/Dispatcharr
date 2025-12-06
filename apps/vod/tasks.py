@@ -1250,6 +1250,16 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     if not episodes_data:
         return
 
+    # Helper function to safely convert to int with fallback
+    def safe_int(value, default=0):
+        """Safely convert value to int, handling None, empty strings, and malformed data."""
+        if value is None or value == '':
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
     # Flatten episodes data
     all_episodes_data = []
 
@@ -1258,7 +1268,11 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
         # Normal format: {"1": [...episodes...], "2": [...episodes...]}
         for season_num, season_episodes in episodes_data.items():
             for episode_data in season_episodes:
-                episode_data['_season_number'] = int(season_num)
+                # Safely convert season_num (could be "Season 9", None, etc.)
+                safe_season = safe_int(season_num, 0)
+                if safe_season == 0 and season_num not in (0, '0', None, ''):
+                    logger.warning(f"Invalid season key '{season_num}' for series {series.name}; defaulting to 0")
+                episode_data['_season_number'] = safe_season
                 all_episodes_data.append(episode_data)
     elif isinstance(episodes_data, list):
         # Malformed format: [...episodes...] (provider didn't organize by season)
@@ -1267,7 +1281,10 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
         for episode_data in episodes_data:
             # Try to get season from episode data itself
             season_num = episode_data.get('season_number') or episode_data.get('season') or 0
-            episode_data['_season_number'] = int(season_num)
+            safe_season = safe_int(season_num, 0)
+            if safe_season == 0 and season_num not in (0, '0', None, ''):
+                logger.warning(f"Invalid season value '{season_num}' for series {series.name}; defaulting to 0")
+            episode_data['_season_number'] = safe_season
             all_episodes_data.append(episode_data)
     else:
         logger.error(f"Unexpected episodes_data format for series {series.name}: {type(episodes_data)}")
@@ -1318,7 +1335,8 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
             # Handle NULL or empty episode titles from provider
             episode_name = episode_data.get('title') or 'EpisodeNameNull'
             season_number = episode_data['_season_number']
-            episode_number = int(episode_data.get('episode_num', 0))
+            # Safely convert episode_num (could be None, empty string, or malformed)
+            episode_number = safe_int(episode_data.get('episode_num'), 0)
             info = episode_data.get('info', {})
 
             # Extract episode metadata

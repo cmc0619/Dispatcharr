@@ -10,6 +10,7 @@ import django
 import subprocess
 import json
 from collections import defaultdict
+from fractions import Fraction
 
 # Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
@@ -68,7 +69,7 @@ def ffprobe_stream(url, timeout=10):
             'codec': video_stream.get('codec_name', 'unknown'),
             'bitrate': int(data.get('format', {}).get('bit_rate', 0)),
             'duration': float(data.get('format', {}).get('duration', 0)),
-            'fps': eval(video_stream.get('r_frame_rate', '0/1')) if video_stream.get('r_frame_rate') else 0,
+            'fps': float(Fraction(video_stream.get('r_frame_rate', '0/1'))) if video_stream.get('r_frame_rate') else 0,
             'file_size': int(data.get('format', {}).get('size', 0)),
         }
 
