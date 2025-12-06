@@ -1489,6 +1489,19 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                         # Episode not found - this shouldn't happen but log it
                         logger.error(f"Could not find episode for key {key} after bulk_create")
 
+            # Also update relations_to_update to reference DB episodes
+            for relation in relations_to_update:
+                if relation.episode and id(relation.episode) in unsaved_episode_set:
+                    key = (
+                        relation.episode.series_id,
+                        relation.episode.season_number,
+                        relation.episode.episode_number
+                    )
+                    if key in all_series_episodes:
+                        relation.episode = all_series_episodes[key]
+                    else:
+                        logger.error(f"Could not find episode for key {key} after bulk_create")
+
         # Update existing episodes
         if episodes_to_update:
             Episode.objects.bulk_update(episodes_to_update, [
