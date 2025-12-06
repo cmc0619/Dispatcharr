@@ -374,7 +374,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     for movie_data in batch:
         try:
             stream_id = str(movie_data.get('stream_id'))
-            name = movie_data.get('name', 'Unknown')
+            # Handle NULL or empty names from provider
+            name = movie_data.get('name') or 'MovieNameNull'
 
             # Get category with proper error handling
             category = None
@@ -686,7 +687,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     for series_data in batch:
         try:
             series_id = str(series_data.get('series_id'))
-            name = series_data.get('name', 'Unknown')
+            # Handle NULL or empty names from provider
+            name = series_data.get('name') or 'SeriesNameNull'
 
             # Get category with proper error handling
             category = None
@@ -1303,7 +1305,8 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     for episode_data in all_episodes_data:
         try:
             episode_id = str(episode_data.get('id'))
-            episode_name = episode_data.get('title', 'Unknown Episode')
+            # Handle NULL or empty episode titles from provider
+            episode_name = episode_data.get('title') or 'EpisodeNameNull'
             season_number = episode_data['_season_number']
             episode_number = int(episode_data.get('episode_num', 0))
             info = episode_data.get('info', {})
