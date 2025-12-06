@@ -655,6 +655,11 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 if id(relation.movie) in created_movies:
                     relation.movie = created_movies[id(relation.movie)]
 
+            # Also update relations_to_update to reference the correct movie objects
+            for relation in relations_to_update:
+                if id(relation.movie) in created_movies:
+                    relation.movie = created_movies[id(relation.movie)]
+
             # Handle relations
             if relations_to_create:
                 M3UMovieRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
@@ -984,6 +989,11 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
 
             # Update relations to reference the correct series objects
             for relation in relations_to_create:
+                if id(relation.series) in created_series:
+                    relation.series = created_series[id(relation.series)]
+
+            # Also update relations_to_update to reference the correct series objects
+            for relation in relations_to_update:
                 if id(relation.series) in created_series:
                     relation.series = created_series[id(relation.series)]
 
