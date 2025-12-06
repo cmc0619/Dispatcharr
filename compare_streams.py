@@ -112,6 +112,8 @@ def find_episodes_with_duplicate_streams():
         duplicate_episodes = (
             M3UEpisodeRelation.objects
             .filter(m3u_account=account)
+            .exclude(episode__isnull=True)
+            .order_by()  # Clear default ordering to prevent bad GROUP BY
             .values('episode')
             .annotate(stream_count=Count('id'))
             .filter(stream_count__gt=1)
