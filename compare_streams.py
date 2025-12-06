@@ -32,6 +32,7 @@ def ffprobe_stream(url, timeout=10):
             '-show_streams',
             '-analyzeduration', '5000000',
             '-probesize', '10000000',
+            '-user_agent', 'VLC/3.0.18-Vetinari',
             url
         ]
 
