@@ -1296,12 +1296,8 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     logger.info(f"Batch processing {len(all_episodes_data)} stream entries for series {series.name}")
 
     # Extract episode identifiers
-    episode_keys = []
     episode_ids = []
     for episode_data in all_episodes_data:
-        season_num = episode_data['_season_number']
-        episode_num = episode_data.get('episode_num', 0)
-        episode_keys.append((series.id, season_num, episode_num))
         episode_ids.append(str(episode_data.get('id')))
 
     # Pre-fetch existing episodes
