@@ -230,11 +230,19 @@ class VODStreamView(View):
                     logger.info(f"[STREAM-SUCCESS] Successfully started stream {stream_id} on attempt {i+1}")
                     return response
 
-                except Exception as e:
-                    logger.warning(f"[STREAM-FAIL] Stream {relation.stream_id} failed: {e}")
+                except (requests.exceptions.RequestException,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.HTTPError) as e:
+                    # Provider/network failures - try next stream
+                    logger.warning(f"[STREAM-FAIL] Provider/network error for stream {relation.stream_id}: {e}")
                     last_error = e
                     # Continue to next candidate
                     continue
+                except Exception as e:
+                    # Systemic errors (Redis, DB, code bugs) - fail immediately, don't retry
+                    logger.error(f"[STREAM-EXCEPTION] Systemic error (not provider failure), aborting: {e}", exc_info=True)
+                    raise
 
             # If loop finishes, all failed
             logger.error(f"[VOD-ERROR] All {len(candidate_relations)} streams failed. Last error: {last_error}")
@@ -382,8 +390,10 @@ class VODStreamView(View):
 
                     # Store the total content length in Redis for the persistent connection to use
                     try:
-                        import redis
-                        r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
+                        from core.utils import RedisClient
+                        r = RedisClient.get_client()
+                        if not r:
+                            raise Exception("Redis not available")
                         content_length_key = f"vod_content_length:{session_id}"
                         r.set(content_length_key, total_size, ex=1800)  # Store for 30 minutes
                         logger.info(f"[VOD-HEAD] Stored total content length {total_size} for session {session_id}")
@@ -417,10 +427,18 @@ class VODStreamView(View):
                     logger.info(f"[VOD-HEAD] Returning HEAD response for stream {stream_id}")
                     return head_response
 
-                except Exception as e:
-                    logger.warning(f"[HEAD-FAIL] Stream {relation.stream_id} failed: {e}")
+                except (requests.exceptions.RequestException,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ConnectionError,
+                        requests.exceptions.HTTPError) as e:
+                    # Provider/network failures - try next stream
+                    logger.warning(f"[HEAD-FAIL] Provider/network error for stream {relation.stream_id}: {e}")
                     last_error = e
                     continue
+                except Exception as e:
+                    # Systemic errors (Redis, DB, code bugs) - fail immediately, don't retry
+                    logger.error(f"[HEAD-EXCEPTION] Systemic error (not provider failure), aborting: {e}", exc_info=True)
+                    raise
 
             # If loop finishes, all failed
             logger.error(f"[VOD-HEAD] All {len(candidate_relations)} streams failed. Last error: {last_error}")

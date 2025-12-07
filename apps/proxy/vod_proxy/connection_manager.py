@@ -96,8 +96,9 @@ class PersistentVODConnection:
             if not self.content_length:
                 # First check if we have a pre-stored content length from HEAD request
                 try:
-                    import redis
-                    r = redis.StrictRedis(host='localhost', port=6379, db=0, decode_responses=True)
+                    r = RedisClient.get_client()
+                    if not r:
+                        raise Exception("Redis not available")
                     content_length_key = f"vod_content_length:{self.session_id}"
                     stored_length = r.get(content_length_key)
                     if stored_length:
