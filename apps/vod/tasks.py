@@ -374,7 +374,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     for movie_data in batch:
         try:
             stream_id = str(movie_data.get('stream_id'))
-            name = movie_data.get('name', 'Unknown')
+            # Handle NULL or empty names from provider
+            name = movie_data.get('name') or 'MovieNameNull'
 
             # Get category with proper error handling
             category = None
@@ -654,6 +655,11 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 if id(relation.movie) in created_movies:
                     relation.movie = created_movies[id(relation.movie)]
 
+            # Also update relations_to_update to reference the correct movie objects
+            for relation in relations_to_update:
+                if id(relation.movie) in created_movies:
+                    relation.movie = created_movies[id(relation.movie)]
+
             # Handle relations
             if relations_to_create:
                 M3UMovieRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
@@ -686,7 +692,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     for series_data in batch:
         try:
             series_id = str(series_data.get('series_id'))
-            name = series_data.get('name', 'Unknown')
+            # Handle NULL or empty names from provider
+            name = series_data.get('name') or 'SeriesNameNull'
 
             # Get category with proper error handling
             category = None
@@ -985,6 +992,11 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 if id(relation.series) in created_series:
                     relation.series = created_series[id(relation.series)]
 
+            # Also update relations_to_update to reference the correct series objects
+            for relation in relations_to_update:
+                if id(relation.series) in created_series:
+                    relation.series = created_series[id(relation.series)]
+
             # Handle relations
             if relations_to_create:
                 M3USeriesRelation.objects.bulk_create(relations_to_create, ignore_conflicts=True)
@@ -1204,10 +1216,12 @@ def refresh_series_episodes(account, series, external_series_id, episodes_data=N
                 else:
                     episodes_data = {}
 
-        # Clear existing episodes for this account to handle deletions
-        Episode.objects.filter(
-            series=series,
-            m3u_relations__m3u_account=account
+        # Clear existing episode relations for this account to handle deletions
+        # Note: Only delete the M3UEpisodeRelation, not the Episode itself
+        # Episodes are deduplicated across accounts and may be shared
+        M3UEpisodeRelation.objects.filter(
+            episode__series=series,
+            m3u_account=account
         ).delete()
 
         # Process all episodes in batch
@@ -1236,25 +1250,54 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     if not episodes_data:
         return
 
+    # Helper function to safely convert to int with fallback
+    def safe_int(value, default=0):
+        """Safely convert value to int, handling None, empty strings, and malformed data."""
+        if value is None or value == '':
+            return default
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
     # Flatten episodes data
     all_episodes_data = []
-    for season_num, season_episodes in episodes_data.items():
-        for episode_data in season_episodes:
-            episode_data['_season_number'] = int(season_num)
+
+    # Handle both dict (normal) and list (malformed provider response) formats
+    if isinstance(episodes_data, dict):
+        # Normal format: {"1": [...episodes...], "2": [...episodes...]}
+        for season_num, season_episodes in episodes_data.items():
+            for episode_data in season_episodes:
+                # Safely convert season_num (could be "Season 9", None, etc.)
+                safe_season = safe_int(season_num, 0)
+                if safe_season == 0 and season_num not in (0, '0', None, ''):
+                    logger.warning(f"Invalid season key '{season_num}' for series {series.name}; defaulting to 0")
+                episode_data['_season_number'] = safe_season
+                all_episodes_data.append(episode_data)
+    elif isinstance(episodes_data, list):
+        # Malformed format: [...episodes...] (provider didn't organize by season)
+        logger.warning(f"Provider returned episodes as list instead of dict for series {series.name}. "
+                      f"Attempting to extract season numbers from episode data.")
+        for episode_data in episodes_data:
+            # Try to get season from episode data itself
+            season_num = episode_data.get('season_number') or episode_data.get('season') or 0
+            safe_season = safe_int(season_num, 0)
+            if safe_season == 0 and season_num not in (0, '0', None, ''):
+                logger.warning(f"Invalid season value '{season_num}' for series {series.name}; defaulting to 0")
+            episode_data['_season_number'] = safe_season
             all_episodes_data.append(episode_data)
+    else:
+        logger.error(f"Unexpected episodes_data format for series {series.name}: {type(episodes_data)}")
+        return
 
     if not all_episodes_data:
         return
 
-    logger.info(f"Batch processing {len(all_episodes_data)} episodes for series {series.name}")
+    logger.info(f"Batch processing {len(all_episodes_data)} stream entries for series {series.name}")
 
     # Extract episode identifiers
-    episode_keys = []
     episode_ids = []
     for episode_data in all_episodes_data:
-        season_num = episode_data['_season_number']
-        episode_num = episode_data.get('episode_num', 0)
-        episode_keys.append((series.id, season_num, episode_num))
         episode_ids.append(str(episode_data.get('id')))
 
     # Pre-fetch existing episodes
@@ -1274,15 +1317,22 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
     # Prepare batch operations
     episodes_to_create = []
     episodes_to_update = []
+    episodes_to_update_set = set()  # Track episodes already queued for update (avoid duplicates)
     relations_to_create = []
     relations_to_update = []
+
+    # Track episodes being created/updated in THIS batch to avoid duplicates
+    # Key: (series_id, season_number, episode_number) -> Episode object
+    batch_episodes = {}
 
     for episode_data in all_episodes_data:
         try:
             episode_id = str(episode_data.get('id'))
-            episode_name = episode_data.get('title', 'Unknown Episode')
+            # Handle NULL or empty episode titles from provider
+            episode_name = episode_data.get('title') or 'EpisodeNameNull'
             season_number = episode_data['_season_number']
-            episode_number = episode_data.get('episode_num', 0)
+            # Safely convert episode_num (could be None, empty string, or malformed)
+            episode_number = safe_int(episode_data.get('episode_num'), 0)
             info = episode_data.get('info', {})
 
             # Extract episode metadata
@@ -1306,56 +1356,71 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 if backdrop:
                     custom_props['backdrop_path'] = [backdrop]
 
-            # Find existing episode
+            # Find existing episode - check batch first, then database
             episode_key = (series.id, season_number, episode_number)
-            episode = existing_episodes.get(episode_key)
 
-            if episode:
-                # Update existing episode
-                updated = False
-                if episode_name != episode.name:
-                    episode.name = episode_name
-                    updated = True
-                if description != episode.description:
-                    episode.description = description
-                    updated = True
-                if rating != episode.rating:
-                    episode.rating = rating
-                    updated = True
-                if air_date != episode.air_date:
-                    episode.air_date = air_date
-                    updated = True
-                if duration_secs != episode.duration_secs:
-                    episode.duration_secs = duration_secs
-                    updated = True
-                if tmdb_id != episode.tmdb_id:
-                    episode.tmdb_id = tmdb_id
-                    updated = True
-                if imdb_id != episode.imdb_id:
-                    episode.imdb_id = imdb_id
-                    updated = True
-                if custom_props != episode.custom_properties:
-                    episode.custom_properties = custom_props if custom_props else None
-                    updated = True
-
-                if updated:
-                    episodes_to_update.append(episode)
+            # Check if we've already processed this episode in this batch
+            if episode_key in batch_episodes:
+                # Reuse the episode from this batch
+                episode = batch_episodes[episode_key]
+                logger.debug(f"Reusing episode from batch: {episode_name} (S{season_number:02d}E{episode_number:02d})")
             else:
-                # Create new episode
-                episode = Episode(
-                    series=series,
-                    name=episode_name,
-                    description=description,
-                    air_date=air_date,
-                    rating=rating,
-                    duration_secs=duration_secs,
-                    season_number=season_number,
-                    episode_number=episode_number,
-                    tmdb_id=tmdb_id,
-                    imdb_id=imdb_id,
-                    custom_properties=custom_props if custom_props else None
-                )
-                episodes_to_create.append(episode)
+                # Check if episode exists in database
+                episode = existing_episodes.get(episode_key)
+
+                if episode:
+                    # Update existing episode (but only once per unique episode)
+                    updated = False
+                    if episode_name != episode.name:
+                        episode.name = episode_name
+                        updated = True
+                    if description != episode.description:
+                        episode.description = description
+                        updated = True
+                    if rating != episode.rating:
+                        episode.rating = rating
+                        updated = True
+                    if air_date != episode.air_date:
+                        episode.air_date = air_date
+                        updated = True
+                    if duration_secs != episode.duration_secs:
+                        episode.duration_secs = duration_secs
+                        updated = True
+                    if tmdb_id != episode.tmdb_id:
+                        episode.tmdb_id = tmdb_id
+                        updated = True
+                    if imdb_id != episode.imdb_id:
+                        episode.imdb_id = imdb_id
+                        updated = True
+                    if custom_props != episode.custom_properties:
+                        episode.custom_properties = custom_props if custom_props else None
+                        updated = True
+
+                    if updated and id(episode) not in episodes_to_update_set:
+                        episodes_to_update.append(episode)
+                        episodes_to_update_set.add(id(episode))
+
+                    # Add to batch tracking
+                    batch_episodes[episode_key] = episode
+                else:
+                    # Create new episode (only once per unique episode)
+                    episode = Episode(
+                        series=series,
+                        name=episode_name,
+                        description=description,
+                        air_date=air_date,
+                        rating=rating,
+                        duration_secs=duration_secs,
+                        season_number=season_number,
+                        episode_number=episode_number,
+                        tmdb_id=tmdb_id,
+                        imdb_id=imdb_id,
+                        custom_properties=custom_props if custom_props else None
+                    )
+                    episodes_to_create.append(episode)
+
+                    # Add to batch tracking
+                    batch_episodes[episode_key] = episode
 
             # Handle episode relation
             if episode_id in existing_relations:
@@ -1389,9 +1454,49 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
 
     # Execute batch operations
     with transaction.atomic():
-        # Create new episodes
+        # Create new episodes with ignore_conflicts to handle race conditions
+        # where another account might create the same episode simultaneously
         if episodes_to_create:
-            Episode.objects.bulk_create(episodes_to_create)
+            # Track which episode objects need their PKs resolved after bulk_create
+            # When using ignore_conflicts=True, PKs are NOT set on the objects
+            unsaved_episode_set = set(id(ep) for ep in episodes_to_create)
+
+            Episode.objects.bulk_create(episodes_to_create, ignore_conflicts=True)
+
+            # Re-fetch ALL episodes for this series to get their actual IDs
+            # This is simpler and more reliable than building complex Q filters
+            all_series_episodes = {
+                (ep.series_id, ep.season_number, ep.episode_number): ep
+                for ep in Episode.objects.filter(series=series)
+            }
+
+            # Update ALL relations that reference episodes from episodes_to_create
+            # to point to the actual saved episodes from the database
+            for relation in relations_to_create:
+                if relation.episode and id(relation.episode) in unsaved_episode_set:
+                    key = (
+                        relation.episode.series_id,
+                        relation.episode.season_number,
+                        relation.episode.episode_number
+                    )
+                    if key in all_series_episodes:
+                        relation.episode = all_series_episodes[key]
+                    else:
+                        # Episode not found - this shouldn't happen but log it
+                        logger.error(f"Could not find episode for key {key} after bulk_create")
+
+            # Also update relations_to_update to reference DB episodes
+            for relation in relations_to_update:
+                if relation.episode and id(relation.episode) in unsaved_episode_set:
+                    key = (
+                        relation.episode.series_id,
+                        relation.episode.season_number,
+                        relation.episode.episode_number
+                    )
+                    if key in all_series_episodes:
+                        relation.episode = all_series_episodes[key]
+                    else:
+                        logger.error(f"Could not find episode for key {key} after bulk_create")
 
         # Update existing episodes
         if episodes_to_update:
@@ -1400,9 +1505,15 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 'tmdb_id', 'imdb_id', 'custom_properties'
             ])
 
+        # Filter out any relations that still have unsaved episodes
+        valid_relations = [r for r in relations_to_create if r.episode and r.episode.pk]
+        if len(valid_relations) != len(relations_to_create):
+            skipped = len(relations_to_create) - len(valid_relations)
+            logger.warning(f"Skipping {skipped} relations with unresolved episodes")
+
         # Create new episode relations
-        if relations_to_create:
-            M3UEpisodeRelation.objects.bulk_create(relations_to_create)
+        if valid_relations:
+            M3UEpisodeRelation.objects.bulk_create(valid_relations)
 
         # Update existing episode relations
         if relations_to_update:
@@ -1410,8 +1521,21 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None)
                 'episode', 'container_extension', 'custom_properties', 'last_seen'
             ])
 
-    logger.info(f"Batch processed episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated, "
-                f"{len(relations_to_create)} new relations, {len(relations_to_update)} updated relations")
+    # Calculate actual relations created (valid_relations if it was set, otherwise relations_to_create)
+    relations_created_count = len(valid_relations) if 'valid_relations' in locals() else len(relations_to_create)
+
+    # Calculate deduplication stats
+    unique_episodes = len(batch_episodes)
+    total_streams = len(all_episodes_data)
+
+    logger.info(f"Batch processed {total_streams} stream(s) -> {unique_episodes} unique episode(s) for series {series.name}")
+    logger.info(f"Episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated")
+    logger.info(f"Relations: {relations_created_count} new, {len(relations_to_update)} updated")
+
+    # Explicit cleanup to help garbage collection in low-memory environments
+    batch_episodes.clear()
+    episodes_to_update_set.clear()
+    del episodes_to_create, episodes_to_update, relations_to_create, relations_to_update
 
 
 @shared_task
