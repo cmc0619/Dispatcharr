@@ -461,6 +461,8 @@ class VODStreamView(View):
                 return series.episodes.first()
             else:
                 return None
+        except Http404:
+            raise  # Let 404s propagate to Django's error handling
         except Exception as e:
             logger.error(f"Error getting content object: {e}")
             return None
